@@ -7,6 +7,7 @@
     limitPerTurn: 1,
     showDebugPanel: true,
   });
+  const KNOWN_IMAGE_TOOL_NAMES = new Set(['GenerateImage']);
 
   const getContextSafe = () => {
     if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
@@ -112,6 +113,8 @@
   const looksLikeImageToolName = (name) => {
     const text = toText(name).toLowerCase();
     if (!text) return false;
+    if (KNOWN_IMAGE_TOOL_NAMES.has(name)) return true;
+    if (text === 'generateimage' || text === 'generate image') return true;
     if (text.includes('image generation')) return true;
     if (text.includes('image') && (text.includes('generate') || text.includes('generation') || text.includes('create'))) {
       return true;
@@ -124,6 +127,7 @@
 
   const looksLikeImageToolDef = (def) => {
     if (!def || typeof def !== 'object') return false;
+    if (def.name && KNOWN_IMAGE_TOOL_NAMES.has(def.name)) return true;
     const haystack = [def.name, def.displayName, def.description]
       .map((v) => toText(v))
       .filter(Boolean)
@@ -291,6 +295,20 @@
     return toText(direct);
   };
 
+  const countImageInvocationsFromMessage = (m) => {
+    if (!m || typeof m !== 'object') return 0;
+    const invocations = m.extra && m.extra.tool_invocations;
+    if (!Array.isArray(invocations) || invocations.length === 0) return 0;
+    let count = 0;
+    for (const invocation of invocations) {
+      const name = toText(invocation?.name || invocation?.displayName);
+      if (looksLikeImageToolName(name)) {
+        count += 1;
+      }
+    }
+    return count;
+  };
+
   const isToolCallMessage = (m) => {
     if (!m || typeof m !== 'object') return false;
     if (m.is_tool === true || m.isTool === true) return true;
@@ -314,6 +332,11 @@
     let count = 0;
     for (let i = lastUserIndex + 1; i < chat.length; i += 1) {
       const msg = chat[i];
+      const invocationCount = countImageInvocationsFromMessage(msg);
+      if (invocationCount > 0) {
+        count += invocationCount;
+        continue;
+      }
       if (!isToolCallMessage(msg)) continue;
       const toolName = extractToolName(msg);
       if (toolName && (imageToolNames.has(toolName) || looksLikeImageToolName(toolName))) {
@@ -343,6 +366,25 @@
     renderDebugPanel();
   };
 
+  const registerToolCallEvents = () => {
+    const liveCtx = getContextSafe() || ctx;
+    const { eventSource, event_types } = liveCtx;
+    if (!eventSource || !event_types) return;
+    const eventName = event_types.TOOL_CALLS_PERFORMED;
+    if (!eventName) return;
+
+    eventSource.on(eventName, (invocations) => {
+      if (!Array.isArray(invocations)) return;
+      for (const invocation of invocations) {
+        const name = toText(invocation?.name || invocation?.displayName);
+        if (looksLikeImageToolName(name)) {
+          markUsed();
+          break;
+        }
+      }
+    });
+  };
+
   const registerMessageReset = () => {
     const liveCtx = getContextSafe() || ctx;
     const { eventSource, event_types } = liveCtx;
@@ -364,6 +406,69 @@
 
   registerMessageReset();
   registerSettingsUI();
+  registerToolCallEvents();
+
+  const wrapRegisterFunctionTool = (registerFn, sourceLabel) => {
+    if (typeof registerFn !== 'function') return null;
+
+    return (def) => {
+      if (def && def.__imageToolBudgetWrapped) {
+        return registerFn(def);
+      }
+      const isImageTool = looksLikeImageToolDef(def);
+
+      if (!isImageTool) {
+        return registerFn(def);
+      }
+
+      if (def && def.name) {
+        imageToolNames.add(def.name);
+      }
+
+      if (def) {
+        def.__imageToolBudgetWrapped = true;
+      }
+
+      console.log('[ImageToolBudget] Detected image tool:', {
+        source: sourceLabel,
+        name: def?.name,
+        displayName: def?.displayName,
+        description: def?.description,
+      });
+      renderDebugPanel();
+
+      const originalShouldRegister = def.shouldRegister;
+      def.shouldRegister = () => {
+        let should = true;
+        if (typeof originalShouldRegister === 'function') {
+          try {
+            should = originalShouldRegister();
+          } catch (err) {
+            console.warn('[ImageToolBudget] shouldRegister error', err);
+            should = true;
+          }
+        }
+        if (!should) return false;
+
+        const state = getState();
+        const usedByHistory = getUsedByHistory();
+        const used = Math.max(state.used || 0, usedByHistory);
+        const limit = getLimitPerTurn();
+        return used < limit;
+      };
+
+      const originalAction = def.action;
+      def.action = async (args, ...rest) => {
+        await markUsed();
+        if (typeof originalAction === 'function') {
+          return originalAction.call(def, args, ...rest);
+        }
+        return '';
+      };
+
+      return registerFn(def);
+    };
+  };
 
   const originalRegister = typeof ctx.registerFunctionTool === 'function'
     ? ctx.registerFunctionTool.bind(ctx)
@@ -371,56 +476,14 @@
 
   if (!originalRegister) {
     console.warn('[ImageToolBudget] registerFunctionTool not found.');
-    return;
+  } else {
+    ctx.registerFunctionTool = wrapRegisterFunctionTool(originalRegister, 'context');
   }
 
-  ctx.registerFunctionTool = (def) => {
-    const isImageTool = looksLikeImageToolDef(def);
-
-    if (!isImageTool) {
-      return originalRegister(def);
-    }
-
-    if (def && def.name) {
-      imageToolNames.add(def.name);
-    }
-
-    console.log('[ImageToolBudget] Detected image tool:', {
-      name: def?.name,
-      displayName: def?.displayName,
-      description: def?.description,
-    });
-    renderDebugPanel();
-
-    const originalShouldRegister = def.shouldRegister;
-    def.shouldRegister = () => {
-      let should = true;
-      if (typeof originalShouldRegister === 'function') {
-        try {
-          should = originalShouldRegister();
-        } catch (err) {
-          console.warn('[ImageToolBudget] shouldRegister error', err);
-          should = true;
-        }
-      }
-      if (!should) return false;
-
-      const state = getState();
-      const usedByHistory = getUsedByHistory();
-      const used = Math.max(state.used || 0, usedByHistory);
-      const limit = getLimitPerTurn();
-      return used < limit;
-    };
-
-    const originalAction = def.action;
-    def.action = async (args, ...rest) => {
-      await markUsed();
-      if (typeof originalAction === 'function') {
-        return originalAction.call(def, args, ...rest);
-      }
-      return '';
-    };
-
-    return originalRegister(def);
-  };
+  if (typeof ToolManager !== 'undefined' && ToolManager.registerFunctionTool) {
+    const toolRegister = ToolManager.registerFunctionTool.bind(ToolManager);
+    ToolManager.registerFunctionTool = wrapRegisterFunctionTool(toolRegister, 'ToolManager');
+  } else {
+    console.warn('[ImageToolBudget] ToolManager.registerFunctionTool not found.');
+  }
 })();
