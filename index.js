@@ -393,19 +393,40 @@
     const { eventSource, event_types } = liveCtx;
     if (!eventSource || !event_types) return;
 
-    const eventName =
-      event_types.MESSAGE_SENT ||
-      event_types.USER_MESSAGE_SENT ||
-      event_types.MESSAGE_CREATED;
+    const resolveMessageFromArgs = (...args) => {
+      if (!args || args.length === 0) return null;
+      const first = args[0];
+      const chat = liveCtx.chat;
+      if (typeof first === 'number' && Array.isArray(chat)) {
+        return chat[first];
+      }
+      if (typeof first === 'string' && Array.isArray(chat)) {
+        const idx = Number(first);
+        if (!Number.isNaN(idx)) return chat[idx];
+      }
+      if (first && typeof first === 'object') {
+        return first;
+      }
+      return null;
+    };
 
-    if (!eventName) return;
-
-    eventSource.on(eventName, (data) => {
-      const candidate = data || (liveCtx.chat && liveCtx.chat[liveCtx.chat.length - 1]);
+    const onUserMessage = (...args) => {
+      const candidate = resolveMessageFromArgs(...args) || (liveCtx.chat && liveCtx.chat[liveCtx.chat.length - 1]);
       if (candidate && (isUserMessage(candidate) || candidate.role === 'user' || candidate.sender === 'user')) {
         resetBudget();
       }
-    });
+    };
+
+    const eventNames = [
+      event_types.MESSAGE_SENT,
+      event_types.USER_MESSAGE_RENDERED,
+      event_types.USER_MESSAGE_SENT,
+      event_types.MESSAGE_CREATED,
+    ].filter(Boolean);
+
+    for (const eventName of eventNames) {
+      eventSource.on(eventName, onUserMessage);
+    }
   };
 
   const getToolManager = () => {
