@@ -169,7 +169,7 @@
 
     const state = getState();
     const usedByHistory = getUsedByHistory();
-    const used = Math.max(state.used || 0, usedByHistory);
+    const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
     const limit = getLimitPerTurn();
     const knownTools = Array.from(imageToolNames).join(', ') || '(none detected yet)';
     const patchedTools = Array.from(patchedToolNames).join(', ') || '(none patched yet)';
@@ -177,7 +177,7 @@
     const lines = [
       `Limit per turn: ${limit}`,
       `Used (metadata): ${state.used || 0}`,
-      `Used by history: ${usedByHistory}`,
+      `Used by history: ${typeof usedByHistory === 'number' ? usedByHistory : 'n/a'}`,
       `Effective used: ${used}`,
       `Known image tool names: ${knownTools}`,
       `Patched tool instances: ${patchedTools}`,
@@ -352,7 +352,34 @@
   const getUsedByHistory = () => {
     const liveCtx = getContextSafe() || ctx;
     const chat = liveCtx.chat || (getContextSafe() && getContextSafe().chat);
+    if (!Array.isArray(chat)) return null;
     return countImageToolCallsSinceLastUser(chat);
+  };
+
+  const getEffectiveUsed = () => {
+    const state = getState();
+    const usedByHistory = getUsedByHistory();
+    if (typeof usedByHistory === 'number') {
+      return usedByHistory;
+    }
+    return state.used || 0;
+  };
+
+  const syncStateWithHistory = async () => {
+    const usedByHistory = getUsedByHistory();
+    if (typeof usedByHistory !== 'number') return;
+    const state = getState();
+    if ((state.used || 0) !== usedByHistory) {
+      state.used = usedByHistory;
+      await saveState();
+      renderDebugPanel();
+    }
+  };
+
+  const scheduleSyncState = () => {
+    syncStateWithHistory();
+    setTimeout(syncStateWithHistory, 150);
+    setTimeout(syncStateWithHistory, 500);
   };
 
   const markUsed = async () => {
@@ -386,6 +413,28 @@
         }
       }
     });
+  };
+
+  const registerChatSync = () => {
+    const liveCtx = getContextSafe() || ctx;
+    const { eventSource, event_types } = liveCtx;
+    if (!eventSource || !event_types) return;
+
+    const onSync = () => {
+      scheduleSyncState();
+    };
+
+    const eventNames = [
+      event_types.CHAT_CHANGED,
+      event_types.CHAT_CREATED,
+      event_types.SETTINGS_LOADED,
+      event_types.EXTENSION_SETTINGS_LOADED,
+      event_types.APP_READY,
+    ].filter(Boolean);
+
+    for (const eventName of eventNames) {
+      eventSource.on(eventName, onSync);
+    }
   };
 
   const registerMessageReset = () => {
@@ -463,18 +512,18 @@
       if (!should) return false;
 
       const state = getState();
-      const usedByHistory = getUsedByHistory();
-      const used = Math.max(state.used || 0, usedByHistory);
-      const limit = getLimitPerTurn();
+    const usedByHistory = getUsedByHistory();
+    const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
+    const limit = getLimitPerTurn();
       return used < limit;
     };
 
     const originalInvoke = typeof tool.invoke === 'function' ? tool.invoke.bind(tool) : null;
     tool.invoke = async (parameters) => {
       const state = getState();
-      const usedByHistory = getUsedByHistory();
-      const used = Math.max(state.used || 0, usedByHistory);
-      const limit = getLimitPerTurn();
+    const usedByHistory = getUsedByHistory();
+    const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
+    const limit = getLimitPerTurn();
       if (used >= limit) {
         console.warn('[ImageToolBudget] Blocked image tool invoke (limit reached).', { used, limit });
         return `Image tool call blocked: limit ${limit} per user message.`;
@@ -519,6 +568,8 @@
   registerMessageReset();
   registerSettingsUI();
   registerToolCallEvents();
+  registerChatSync();
+  scheduleSyncState();
   patchExistingTools();
   scheduleToolPatch();
 
@@ -565,18 +616,18 @@
         if (!should) return false;
 
         const state = getState();
-        const usedByHistory = getUsedByHistory();
-        const used = Math.max(state.used || 0, usedByHistory);
-        const limit = getLimitPerTurn();
+    const usedByHistory = getUsedByHistory();
+    const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
+    const limit = getLimitPerTurn();
         return used < limit;
       };
 
       const originalAction = def.action;
       def.action = async (args, ...rest) => {
         const state = getState();
-        const usedByHistory = getUsedByHistory();
-        const used = Math.max(state.used || 0, usedByHistory);
-        const limit = getLimitPerTurn();
+      const usedByHistory = getUsedByHistory();
+      const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
+      const limit = getLimitPerTurn();
         if (used >= limit) {
           console.warn('[ImageToolBudget] Blocked image tool call (limit reached).', { used, limit });
           return `Image tool call blocked: limit ${limit} per user message.`;
@@ -601,7 +652,7 @@
       if (looksLikeImageToolName(toolName)) {
         const state = getState();
         const usedByHistory = getUsedByHistory();
-        const used = Math.max(state.used || 0, usedByHistory);
+        const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
         const limit = getLimitPerTurn();
         if (used >= limit) {
           console.warn('[ImageToolBudget] Blocked image tool invocation (limit reached).', { used, limit });
