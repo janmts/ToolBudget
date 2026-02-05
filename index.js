@@ -33,7 +33,7 @@
 
   const imageToolNames = new Set(KNOWN_IMAGE_TOOL_NAMES);
   const patchedToolNames = new Set();
-  let inMemoryState = { used: 0 };
+  let inMemoryState = { used: 0, stoppedThisTurn: false };
   let inMemorySettings = { limitPerTurn: 1, showDebugPanel: true };
 
   const getState = () => {
@@ -42,9 +42,12 @@
       return inMemoryState;
     }
     if (!liveCtx.chatMetadata[EXTENSION_KEY]) {
-      liveCtx.chatMetadata[EXTENSION_KEY] = { used: 0 };
+      liveCtx.chatMetadata[EXTENSION_KEY] = { used: 0, stoppedThisTurn: false };
     }
-    return liveCtx.chatMetadata[EXTENSION_KEY];
+    const state = liveCtx.chatMetadata[EXTENSION_KEY];
+    if (!Object.hasOwn(state, 'used')) state.used = 0;
+    if (!Object.hasOwn(state, 'stoppedThisTurn')) state.stoppedThisTurn = false;
+    return state;
   };
 
   const cloneSettings = (settings) => {
@@ -179,6 +182,7 @@
       `Used (metadata): ${state.used || 0}`,
       `Used by history: ${typeof usedByHistory === 'number' ? usedByHistory : 'n/a'}`,
       `Effective used: ${used}`,
+      `Stopped this turn: ${state.stoppedThisTurn ? 'yes' : 'no'}`,
       `Known image tool names: ${knownTools}`,
       `Patched tool instances: ${patchedTools}`,
     ];
@@ -369,8 +373,16 @@
     const usedByHistory = getUsedByHistory();
     if (typeof usedByHistory !== 'number') return;
     const state = getState();
+    let changed = false;
     if ((state.used || 0) !== usedByHistory) {
       state.used = usedByHistory;
+      changed = true;
+    }
+    if (usedByHistory === 0 && state.stoppedThisTurn) {
+      state.stoppedThisTurn = false;
+      changed = true;
+    }
+    if (changed) {
       await saveState();
       renderDebugPanel();
     }
@@ -389,9 +401,23 @@
     renderDebugPanel();
   };
 
+  const stopGenerationOnce = async () => {
+    const state = getState();
+    if (state.stoppedThisTurn) return;
+    state.stoppedThisTurn = true;
+    await saveState();
+    renderDebugPanel();
+
+    const liveCtx = getContextSafe() || ctx;
+    if (typeof liveCtx.stopGeneration === 'function') {
+      liveCtx.stopGeneration();
+    }
+  };
+
   const resetBudget = async () => {
     const state = getState();
     state.used = 0;
+    state.stoppedThisTurn = false;
     await saveState();
     renderDebugPanel();
   };
@@ -409,6 +435,7 @@
         const name = toText(invocation?.name || invocation?.displayName);
         if (looksLikeImageToolName(name)) {
           markUsed();
+          stopGenerationOnce();
           break;
         }
       }
@@ -518,23 +545,24 @@
       return used < limit;
     };
 
-    const originalInvoke = typeof tool.invoke === 'function' ? tool.invoke.bind(tool) : null;
-    tool.invoke = async (parameters) => {
-      const state = getState();
-    const usedByHistory = getUsedByHistory();
-    const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
-    const limit = getLimitPerTurn();
-      if (used >= limit) {
-        console.warn('[ImageToolBudget] Blocked image tool invoke (limit reached).', { used, limit });
-        return `Image tool call blocked: limit ${limit} per user message.`;
-      }
+      const originalInvoke = typeof tool.invoke === 'function' ? tool.invoke.bind(tool) : null;
+      tool.invoke = async (parameters) => {
+        const state = getState();
+        const usedByHistory = getUsedByHistory();
+        const used = typeof usedByHistory === 'number' ? usedByHistory : (state.used || 0);
+        const limit = getLimitPerTurn();
+        if (used >= limit) {
+          console.warn('[ImageToolBudget] Blocked image tool invoke (limit reached).', { used, limit });
+          return `Image tool call blocked: limit ${limit} per user message.`;
+        }
 
-      await markUsed();
-      if (originalInvoke) {
-        return originalInvoke(parameters);
-      }
-      return '';
-    };
+        await markUsed();
+        await stopGenerationOnce();
+        if (originalInvoke) {
+          return originalInvoke(parameters);
+        }
+        return '';
+      };
 
     return true;
   };
@@ -658,6 +686,7 @@
           console.warn('[ImageToolBudget] Blocked image tool invocation (limit reached).', { used, limit });
           return `Image tool call blocked: limit ${limit} per user message.`;
         }
+        await stopGenerationOnce();
       }
       return invokeFn(name, parameters, ...rest);
     };
