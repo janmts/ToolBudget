@@ -199,25 +199,28 @@
 
     const settings = getSettings();
     const html = `
-      <div id="image-tool-budget-settings" class="st-extension-settings">
-        <div class="st-extension-header">Image Tool Budget</div>
-        <div class="st-extension-control">
-          <label for="image-tool-budget-limit">Max image tool calls per user message</label>
-          <select id="image-tool-budget-limit">
-            <option value="1">1 (default)</option>
-            <option value="0">0 (disable image tool)</option>
-          </select>
-        </div>
-        <div class="st-extension-control">
-          <label>
-            <input type="checkbox" id="image-tool-budget-debug-toggle" />
-            Show debug panel
-          </label>
-        </div>
-        <div id="image-tool-budget-debug-panel" class="st-extension-debug">
-          <div class="st-extension-header">Debug</div>
-          <pre id="image-tool-budget-debug-data"></pre>
-          <button type="button" id="image-tool-budget-refresh" class="menu_button">Refresh</button>
+      <div id="image-tool-budget-settings" class="image-tool-budget-settings">
+        <div class="inline-drawer">
+          <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Image Tool Budget</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+          </div>
+          <div class="inline-drawer-content">
+            <label for="image-tool-budget-limit">Max image tool calls per user message</label>
+            <select id="image-tool-budget-limit" class="text_pole">
+              <option value="1">1 (default)</option>
+              <option value="0">0 (disable image tool)</option>
+            </select>
+            <label class="checkbox_label" for="image-tool-budget-debug-toggle">
+              <input type="checkbox" id="image-tool-budget-debug-toggle" />
+              <span>Show debug panel</span>
+            </label>
+            <div id="image-tool-budget-debug-panel" class="marginTop5">
+              <div class="standoutHeader inline-drawer-header">Debug</div>
+              <pre id="image-tool-budget-debug-data" class="marginTop5"></pre>
+              <button type="button" id="image-tool-budget-refresh" class="menu_button">Refresh</button>
+            </div>
+          </div>
         </div>
       </div>
     `;
