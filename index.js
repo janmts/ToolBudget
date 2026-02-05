@@ -2,7 +2,11 @@
   'use strict';
 
   const EXTENSION_KEY = 'image_tool_budget';
-  const LIMIT_PER_TURN = 1;
+  const SETTINGS_KEY = 'image_tool_budget';
+  const DEFAULT_SETTINGS = Object.freeze({
+    limitPerTurn: 1,
+    showDebugPanel: true,
+  });
 
   const getContextSafe = () => {
     if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
@@ -28,6 +32,7 @@
 
   const imageToolNames = new Set();
   let inMemoryState = { used: 0 };
+  let inMemorySettings = { limitPerTurn: 1, showDebugPanel: true };
 
   const getState = () => {
     const liveCtx = getContextSafe() || ctx;
@@ -38,6 +43,49 @@
       liveCtx.chatMetadata[EXTENSION_KEY] = { used: 0 };
     }
     return liveCtx.chatMetadata[EXTENSION_KEY];
+  };
+
+  const cloneSettings = (settings) => {
+    if (typeof structuredClone === 'function') {
+      return structuredClone(settings);
+    }
+    return JSON.parse(JSON.stringify(settings));
+  };
+
+  const getSettings = () => {
+    const liveCtx = getContextSafe() || ctx;
+    if (!liveCtx.extensionSettings) {
+      return inMemorySettings;
+    }
+    if (!liveCtx.extensionSettings[SETTINGS_KEY]) {
+      liveCtx.extensionSettings[SETTINGS_KEY] = cloneSettings(DEFAULT_SETTINGS);
+    }
+    const settings = liveCtx.extensionSettings[SETTINGS_KEY];
+    for (const key of Object.keys(DEFAULT_SETTINGS)) {
+      if (!Object.hasOwn(settings, key)) {
+        settings[key] = DEFAULT_SETTINGS[key];
+      }
+    }
+    return settings;
+  };
+
+  const saveSettings = () => {
+    const liveCtx = getContextSafe() || ctx;
+    if (typeof liveCtx.saveSettingsDebounced === 'function') {
+      liveCtx.saveSettingsDebounced();
+    }
+  };
+
+  const clampLimit = (value) => {
+    const parsed = Number(value);
+    if (Number.isNaN(parsed)) return DEFAULT_SETTINGS.limitPerTurn;
+    if (parsed <= 0) return 0;
+    return 1;
+  };
+
+  const getLimitPerTurn = () => {
+    const settings = getSettings();
+    return clampLimit(settings.limitPerTurn);
   };
 
   const saveState = async () => {
@@ -87,6 +135,131 @@
       return true;
     }
     return false;
+  };
+
+  const getSettingsContainer = ($) => {
+    const candidates = [
+      '#extensions_settings',
+      '#extensions_settings_container',
+      '#extensions-settings',
+      '.extensions_settings',
+    ];
+    for (const selector of candidates) {
+      const node = $(selector);
+      if (node && node.length) return node;
+    }
+    return null;
+  };
+
+  const renderDebugPanel = () => {
+    const $ = window.jQuery || window.$;
+    if (!$) return;
+    const panel = $('#image-tool-budget-debug-panel');
+    const dataNode = $('#image-tool-budget-debug-data');
+    if (!panel.length || !dataNode.length) return;
+    const settings = getSettings();
+    const show = !!settings.showDebugPanel;
+    panel.toggle(show);
+    if (!show) return;
+
+    const state = getState();
+    const usedByHistory = getUsedByHistory();
+    const used = Math.max(state.used || 0, usedByHistory);
+    const limit = getLimitPerTurn();
+    const knownTools = Array.from(imageToolNames).join(', ') || '(none detected yet)';
+
+    const lines = [
+      `Limit per turn: ${limit}`,
+      `Used (metadata): ${state.used || 0}`,
+      `Used by history: ${usedByHistory}`,
+      `Effective used: ${used}`,
+      `Known image tool names: ${knownTools}`,
+    ];
+
+    dataNode.text(lines.join('\n'));
+  };
+
+  const initSettingsUI = () => {
+    const $ = window.jQuery || window.$;
+    if (!$) {
+      console.warn('[ImageToolBudget] jQuery not available for settings UI.');
+      return;
+    }
+
+    if ($('#image-tool-budget-settings').length) {
+      renderDebugPanel();
+      return;
+    }
+
+    const container = getSettingsContainer($);
+    if (!container) {
+      console.warn('[ImageToolBudget] Could not find extensions settings container.');
+      return;
+    }
+
+    const settings = getSettings();
+    const html = `
+      <div id="image-tool-budget-settings" class="st-extension-settings">
+        <div class="st-extension-header">Image Tool Budget</div>
+        <div class="st-extension-control">
+          <label for="image-tool-budget-limit">Max image tool calls per user message</label>
+          <select id="image-tool-budget-limit">
+            <option value="1">1 (default)</option>
+            <option value="0">0 (disable image tool)</option>
+          </select>
+        </div>
+        <div class="st-extension-control">
+          <label>
+            <input type="checkbox" id="image-tool-budget-debug-toggle" />
+            Show debug panel
+          </label>
+        </div>
+        <div id="image-tool-budget-debug-panel" class="st-extension-debug">
+          <div class="st-extension-header">Debug</div>
+          <pre id="image-tool-budget-debug-data"></pre>
+          <button type="button" id="image-tool-budget-refresh" class="menu_button">Refresh</button>
+        </div>
+      </div>
+    `;
+
+    container.append(html);
+
+    $('#image-tool-budget-limit').val(String(clampLimit(settings.limitPerTurn)));
+    $('#image-tool-budget-debug-toggle').prop('checked', !!settings.showDebugPanel);
+
+    $('#image-tool-budget-limit').on('change', (event) => {
+      const nextValue = clampLimit(event.target.value);
+      settings.limitPerTurn = nextValue;
+      saveSettings();
+      renderDebugPanel();
+    });
+
+    $('#image-tool-budget-debug-toggle').on('change', (event) => {
+      settings.showDebugPanel = !!event.target.checked;
+      saveSettings();
+      renderDebugPanel();
+    });
+
+    $('#image-tool-budget-refresh').on('click', () => {
+      renderDebugPanel();
+    });
+
+    renderDebugPanel();
+  };
+
+  const registerSettingsUI = () => {
+    const liveCtx = getContextSafe() || ctx;
+    const { eventSource, event_types } = liveCtx;
+    if (eventSource && event_types && event_types.APP_READY) {
+      eventSource.on(event_types.APP_READY, initSettingsUI);
+      return;
+    }
+
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      initSettingsUI();
+    } else {
+      window.addEventListener('DOMContentLoaded', initSettingsUI);
+    }
   };
 
   const isUserMessage = (m) => {
@@ -157,12 +330,14 @@
     const state = getState();
     state.used = 1;
     await saveState();
+    renderDebugPanel();
   };
 
   const resetBudget = async () => {
     const state = getState();
     state.used = 0;
     await saveState();
+    renderDebugPanel();
   };
 
   const registerMessageReset = () => {
@@ -185,6 +360,7 @@
   };
 
   registerMessageReset();
+  registerSettingsUI();
 
   const originalRegister = typeof ctx.registerFunctionTool === 'function'
     ? ctx.registerFunctionTool.bind(ctx)
@@ -211,6 +387,7 @@
       displayName: def?.displayName,
       description: def?.description,
     });
+    renderDebugPanel();
 
     const originalShouldRegister = def.shouldRegister;
     def.shouldRegister = () => {
@@ -228,7 +405,8 @@
       const state = getState();
       const usedByHistory = getUsedByHistory();
       const used = Math.max(state.used || 0, usedByHistory);
-      return used < LIMIT_PER_TURN;
+      const limit = getLimitPerTurn();
+      return used < limit;
     };
 
     const originalAction = def.action;
