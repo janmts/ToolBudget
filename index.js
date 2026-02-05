@@ -32,6 +32,7 @@
   ctx.__imageToolBudgetWrapped = true;
 
   const imageToolNames = new Set(KNOWN_IMAGE_TOOL_NAMES);
+  const patchedToolNames = new Set();
   let inMemoryState = { used: 0 };
   let inMemorySettings = { limitPerTurn: 1, showDebugPanel: true };
 
@@ -171,6 +172,7 @@
     const used = Math.max(state.used || 0, usedByHistory);
     const limit = getLimitPerTurn();
     const knownTools = Array.from(imageToolNames).join(', ') || '(none detected yet)';
+    const patchedTools = Array.from(patchedToolNames).join(', ') || '(none patched yet)';
 
     const lines = [
       `Limit per turn: ${limit}`,
@@ -178,6 +180,7 @@
       `Used by history: ${usedByHistory}`,
       `Effective used: ${used}`,
       `Known image tool names: ${knownTools}`,
+      `Patched tool instances: ${patchedTools}`,
     ];
 
     dataNode.text(lines.join('\n'));
@@ -405,9 +408,98 @@
     });
   };
 
+  const getToolManager = () => {
+    const liveCtx = getContextSafe() || ctx;
+    return liveCtx.ToolManager || globalThis.ToolManager || null;
+  };
+
+  const patchToolInstance = (tool) => {
+    if (!tool || tool.__imageToolBudgetPatched) return false;
+    const toolInfo = typeof tool.toFunctionOpenAI === 'function' ? tool.toFunctionOpenAI() : null;
+    const name = toText(toolInfo?.function?.name);
+    const displayName = toText(tool.displayName);
+    if (!looksLikeImageToolName(name) && !looksLikeImageToolName(displayName)) {
+      return false;
+    }
+
+    tool.__imageToolBudgetPatched = true;
+    patchedToolNames.add(name || displayName || '(unknown)');
+    if (name) {
+      imageToolNames.add(name);
+    }
+
+    const originalShouldRegister = typeof tool.shouldRegister === 'function' ? tool.shouldRegister.bind(tool) : null;
+    tool.shouldRegister = async () => {
+      let should = true;
+      if (originalShouldRegister) {
+        try {
+          should = await originalShouldRegister();
+        } catch (err) {
+          console.warn('[ImageToolBudget] tool.shouldRegister error', err);
+          should = true;
+        }
+      }
+      if (!should) return false;
+
+      const state = getState();
+      const usedByHistory = getUsedByHistory();
+      const used = Math.max(state.used || 0, usedByHistory);
+      const limit = getLimitPerTurn();
+      return used < limit;
+    };
+
+    const originalInvoke = typeof tool.invoke === 'function' ? tool.invoke.bind(tool) : null;
+    tool.invoke = async (parameters) => {
+      const state = getState();
+      const usedByHistory = getUsedByHistory();
+      const used = Math.max(state.used || 0, usedByHistory);
+      const limit = getLimitPerTurn();
+      if (used >= limit) {
+        console.warn('[ImageToolBudget] Blocked image tool invoke (limit reached).', { used, limit });
+        return `Image tool call blocked: limit ${limit} per user message.`;
+      }
+
+      await markUsed();
+      if (originalInvoke) {
+        return originalInvoke(parameters);
+      }
+      return '';
+    };
+
+    return true;
+  };
+
+  const patchExistingTools = () => {
+    const toolManager = getToolManager();
+    if (!toolManager || !toolManager.tools) return;
+    let patched = 0;
+    for (const tool of toolManager.tools) {
+      if (patchToolInstance(tool)) {
+        patched += 1;
+      }
+    }
+    if (patched > 0) {
+      renderDebugPanel();
+    }
+  };
+
+  const scheduleToolPatch = () => {
+    let attempts = 0;
+    const maxAttempts = 15;
+    const timer = setInterval(() => {
+      attempts += 1;
+      patchExistingTools();
+      if (attempts >= maxAttempts) {
+        clearInterval(timer);
+      }
+    }, 750);
+  };
+
   registerMessageReset();
   registerSettingsUI();
   registerToolCallEvents();
+  patchExistingTools();
+  scheduleToolPatch();
 
   const wrapRegisterFunctionTool = (registerFn, sourceLabel) => {
     if (typeof registerFn !== 'function') return null;
@@ -509,16 +601,17 @@
     ctx.registerFunctionTool = wrapRegisterFunctionTool(originalRegister, 'context');
   }
 
-  if (typeof ToolManager !== 'undefined' && ToolManager.registerFunctionTool) {
-    const toolRegister = ToolManager.registerFunctionTool.bind(ToolManager);
-    ToolManager.registerFunctionTool = wrapRegisterFunctionTool(toolRegister, 'ToolManager');
+  const toolManager = getToolManager();
+  if (toolManager && toolManager.registerFunctionTool) {
+    const toolRegister = toolManager.registerFunctionTool.bind(toolManager);
+    toolManager.registerFunctionTool = wrapRegisterFunctionTool(toolRegister, 'ToolManager');
   } else {
     console.warn('[ImageToolBudget] ToolManager.registerFunctionTool not found.');
   }
 
-  if (typeof ToolManager !== 'undefined' && ToolManager.invokeFunctionTool) {
-    const toolInvoke = ToolManager.invokeFunctionTool.bind(ToolManager);
-    ToolManager.invokeFunctionTool = wrapInvokeFunctionTool(toolInvoke);
+  if (toolManager && toolManager.invokeFunctionTool) {
+    const toolInvoke = toolManager.invokeFunctionTool.bind(toolManager);
+    toolManager.invokeFunctionTool = wrapInvokeFunctionTool(toolInvoke);
   } else {
     console.warn('[ImageToolBudget] ToolManager.invokeFunctionTool not found.');
   }
