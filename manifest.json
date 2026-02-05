@@ -1,0 +1,9 @@
+{
+  "name": "image-tool-budget",
+  "display_name": "Image Tool Budget",
+  "author": "ToolBudget",
+  "version": "0.1.0",
+  "description": "Hard-limit the built-in Image Generation function tool to one call per user message.",
+  "entry": "index.js",
+  "loading_order": 999
+}
