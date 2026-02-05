@@ -31,7 +31,7 @@
   }
   ctx.__imageToolBudgetWrapped = true;
 
-  const imageToolNames = new Set();
+  const imageToolNames = new Set(KNOWN_IMAGE_TOOL_NAMES);
   let inMemoryState = { used: 0 };
   let inMemorySettings = { limitPerTurn: 1, showDebugPanel: true };
 
@@ -398,7 +398,8 @@
     if (!eventName) return;
 
     eventSource.on(eventName, (data) => {
-      if (!data || isUserMessage(data) || data.role === 'user' || data.sender === 'user') {
+      const candidate = data || (liveCtx.chat && liveCtx.chat[liveCtx.chat.length - 1]);
+      if (candidate && (isUserMessage(candidate) || candidate.role === 'user' || candidate.sender === 'user')) {
         resetBudget();
       }
     });
@@ -459,6 +460,15 @@
 
       const originalAction = def.action;
       def.action = async (args, ...rest) => {
+        const state = getState();
+        const usedByHistory = getUsedByHistory();
+        const used = Math.max(state.used || 0, usedByHistory);
+        const limit = getLimitPerTurn();
+        if (used >= limit) {
+          console.warn('[ImageToolBudget] Blocked image tool call (limit reached).', { used, limit });
+          return `Image tool call blocked: limit ${limit} per user message.`;
+        }
+
         await markUsed();
         if (typeof originalAction === 'function') {
           return originalAction.call(def, args, ...rest);
@@ -467,6 +477,25 @@
       };
 
       return registerFn(def);
+    };
+  };
+
+  const wrapInvokeFunctionTool = (invokeFn) => {
+    if (typeof invokeFn !== 'function') return null;
+
+    return async (name, parameters, ...rest) => {
+      const toolName = toText(name);
+      if (looksLikeImageToolName(toolName)) {
+        const state = getState();
+        const usedByHistory = getUsedByHistory();
+        const used = Math.max(state.used || 0, usedByHistory);
+        const limit = getLimitPerTurn();
+        if (used >= limit) {
+          console.warn('[ImageToolBudget] Blocked image tool invocation (limit reached).', { used, limit });
+          return `Image tool call blocked: limit ${limit} per user message.`;
+        }
+      }
+      return invokeFn(name, parameters, ...rest);
     };
   };
 
@@ -485,5 +514,12 @@
     ToolManager.registerFunctionTool = wrapRegisterFunctionTool(toolRegister, 'ToolManager');
   } else {
     console.warn('[ImageToolBudget] ToolManager.registerFunctionTool not found.');
+  }
+
+  if (typeof ToolManager !== 'undefined' && ToolManager.invokeFunctionTool) {
+    const toolInvoke = ToolManager.invokeFunctionTool.bind(ToolManager);
+    ToolManager.invokeFunctionTool = wrapInvokeFunctionTool(toolInvoke);
+  } else {
+    console.warn('[ImageToolBudget] ToolManager.invokeFunctionTool not found.');
   }
 })();
