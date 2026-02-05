@@ -33,7 +33,7 @@
 
   const imageToolNames = new Set(KNOWN_IMAGE_TOOL_NAMES);
   const patchedToolNames = new Set();
-  let inMemoryState = { used: 0, stoppedThisTurn: false };
+  let inMemoryState = { used: 0, stoppedThisTurn: false, blockNextGeneration: false };
   let inMemorySettings = { limitPerTurn: 1, showDebugPanel: true };
 
   const getState = () => {
@@ -42,11 +42,12 @@
       return inMemoryState;
     }
     if (!liveCtx.chatMetadata[EXTENSION_KEY]) {
-      liveCtx.chatMetadata[EXTENSION_KEY] = { used: 0, stoppedThisTurn: false };
+      liveCtx.chatMetadata[EXTENSION_KEY] = { used: 0, stoppedThisTurn: false, blockNextGeneration: false };
     }
     const state = liveCtx.chatMetadata[EXTENSION_KEY];
     if (!Object.hasOwn(state, 'used')) state.used = 0;
     if (!Object.hasOwn(state, 'stoppedThisTurn')) state.stoppedThisTurn = false;
+    if (!Object.hasOwn(state, 'blockNextGeneration')) state.blockNextGeneration = false;
     return state;
   };
 
@@ -183,6 +184,7 @@
       `Used by history: ${typeof usedByHistory === 'number' ? usedByHistory : 'n/a'}`,
       `Effective used: ${used}`,
       `Stopped this turn: ${state.stoppedThisTurn ? 'yes' : 'no'}`,
+      `Block next generation: ${state.blockNextGeneration ? 'yes' : 'no'}`,
       `Known image tool names: ${knownTools}`,
       `Patched tool instances: ${patchedTools}`,
     ];
@@ -382,6 +384,10 @@
       state.stoppedThisTurn = false;
       changed = true;
     }
+    if (usedByHistory === 0 && state.blockNextGeneration) {
+      state.blockNextGeneration = false;
+      changed = true;
+    }
     if (changed) {
       await saveState();
       renderDebugPanel();
@@ -401,23 +407,19 @@
     renderDebugPanel();
   };
 
-  const stopGenerationOnce = async () => {
+  const flagBlockNextGeneration = async () => {
     const state = getState();
-    if (state.stoppedThisTurn) return;
-    state.stoppedThisTurn = true;
+    if (state.blockNextGeneration) return;
+    state.blockNextGeneration = true;
     await saveState();
     renderDebugPanel();
-
-    const liveCtx = getContextSafe() || ctx;
-    if (typeof liveCtx.stopGeneration === 'function') {
-      liveCtx.stopGeneration();
-    }
   };
 
   const resetBudget = async () => {
     const state = getState();
     state.used = 0;
     state.stoppedThisTurn = false;
+    state.blockNextGeneration = false;
     await saveState();
     renderDebugPanel();
   };
@@ -435,7 +437,7 @@
         const name = toText(invocation?.name || invocation?.displayName);
         if (looksLikeImageToolName(name)) {
           markUsed();
-          stopGenerationOnce();
+          flagBlockNextGeneration();
           break;
         }
       }
@@ -462,6 +464,21 @@
     for (const eventName of eventNames) {
       eventSource.on(eventName, onSync);
     }
+  };
+
+  const registerGenerationInterceptor = () => {
+    if (globalThis.ImageToolBudgetInterceptor) return;
+    globalThis.ImageToolBudgetInterceptor = async (_chat, _contextSize, abort, _type) => {
+      const state = getState();
+      if (!state.blockNextGeneration) return;
+      state.blockNextGeneration = false;
+      state.stoppedThisTurn = true;
+      await saveState();
+      renderDebugPanel();
+      if (typeof abort === 'function') {
+        abort(true);
+      }
+    };
   };
 
   const registerMessageReset = () => {
@@ -557,7 +574,7 @@
         }
 
         await markUsed();
-        await stopGenerationOnce();
+        await flagBlockNextGeneration();
         if (originalInvoke) {
           return originalInvoke(parameters);
         }
@@ -597,6 +614,7 @@
   registerSettingsUI();
   registerToolCallEvents();
   registerChatSync();
+  registerGenerationInterceptor();
   scheduleSyncState();
   patchExistingTools();
   scheduleToolPatch();
@@ -686,7 +704,7 @@
           console.warn('[ImageToolBudget] Blocked image tool invocation (limit reached).', { used, limit });
           return `Image tool call blocked: limit ${limit} per user message.`;
         }
-        await stopGenerationOnce();
+        await flagBlockNextGeneration();
       }
       return invokeFn(name, parameters, ...rest);
     };
